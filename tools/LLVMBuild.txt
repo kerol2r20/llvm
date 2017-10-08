@@ -25,6 +25,7 @@ subdirectories =
  llvm-as
  llvm-bcanalyzer
  llvm-cat
+ llvm-cfi-verify
  llvm-cov
  llvm-cvtres
  llvm-diff
@@ -40,6 +41,7 @@ subdirectories =
  llvm-modextract
  llvm-mt
  llvm-nm
+ llvm-objcopy
  llvm-objdump
  llvm-pdbutil
  llvm-profdata

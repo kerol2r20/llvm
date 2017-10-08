@@ -246,7 +246,6 @@ void ScalarEnumerationTraits<ELFYAML::ELF_ELFOSABI>::enumeration(
   ECase(ELFOSABI_HPUX);
   ECase(ELFOSABI_NETBSD);
   ECase(ELFOSABI_GNU);
-  ECase(ELFOSABI_GNU);
   ECase(ELFOSABI_HURD);
   ECase(ELFOSABI_SOLARIS);
   ECase(ELFOSABI_AIX);
@@ -260,10 +259,12 @@ void ScalarEnumerationTraits<ELFYAML::ELF_ELFOSABI>::enumeration(
   ECase(ELFOSABI_AROS);
   ECase(ELFOSABI_FENIXOS);
   ECase(ELFOSABI_CLOUDABI);
-  ECase(ELFOSABI_C6000_ELFABI);
   ECase(ELFOSABI_AMDGPU_HSA);
-  ECase(ELFOSABI_C6000_LINUX);
+  ECase(ELFOSABI_AMDGPU_PAL);
+  ECase(ELFOSABI_AMDGPU_MESA3D);
   ECase(ELFOSABI_ARM);
+  ECase(ELFOSABI_C6000_ELFABI);
+  ECase(ELFOSABI_C6000_LINUX);
   ECase(ELFOSABI_STANDALONE);
 #undef ECase
 }
@@ -359,7 +360,18 @@ void ScalarBitSetTraits<ELFYAML::ELF_EF>::bitset(IO &IO,
     BCase(EF_AVR_ARCH_XMEGA6);
     BCase(EF_AVR_ARCH_XMEGA7);
     break;
+  case ELF::EM_RISCV:
+    BCase(EF_RISCV_RVC);
+    BCaseMask(EF_RISCV_FLOAT_ABI_SOFT, EF_RISCV_FLOAT_ABI);
+    BCaseMask(EF_RISCV_FLOAT_ABI_SINGLE, EF_RISCV_FLOAT_ABI);
+    BCaseMask(EF_RISCV_FLOAT_ABI_DOUBLE, EF_RISCV_FLOAT_ABI);
+    BCaseMask(EF_RISCV_FLOAT_ABI_QUAD, EF_RISCV_FLOAT_ABI);
+    BCase(EF_RISCV_RVE);
+    break;
   case ELF::EM_AMDGPU:
+    BCaseMask(EF_AMDGPU_ARCH_R600, EF_AMDGPU_ARCH);
+    BCaseMask(EF_AMDGPU_ARCH_GCN, EF_AMDGPU_ARCH);
+    break;
   case ELF::EM_X86_64:
     break;
   default:
@@ -450,6 +462,7 @@ void ScalarBitSetTraits<ELFYAML::ELF_SHF>::bitset(IO &IO,
   BCase(SHF_OS_NONCONFORMING);
   BCase(SHF_GROUP);
   BCase(SHF_TLS);
+  BCase(SHF_COMPRESSED);
   switch (Object->Header.Machine) {
   case ELF::EM_ARM:
     BCase(SHF_ARM_PURECODE);
@@ -475,6 +488,28 @@ void ScalarBitSetTraits<ELFYAML::ELF_SHF>::bitset(IO &IO,
     break;
   }
 #undef BCase
+}
+
+void ScalarEnumerationTraits<ELFYAML::ELF_SHN>::enumeration(
+    IO &IO, ELFYAML::ELF_SHN &Value) {
+#define ECase(X) IO.enumCase(Value, #X, ELF::X)
+  ECase(SHN_UNDEF);
+  ECase(SHN_LORESERVE);
+  ECase(SHN_LOPROC);
+  ECase(SHN_HIPROC);
+  ECase(SHN_LOOS);
+  ECase(SHN_HIOS);
+  ECase(SHN_ABS);
+  ECase(SHN_COMMON);
+  ECase(SHN_XINDEX);
+  ECase(SHN_HIRESERVE);
+  ECase(SHN_HEXAGON_SCOMMON);
+  ECase(SHN_HEXAGON_SCOMMON_1);
+  ECase(SHN_HEXAGON_SCOMMON_2);
+  ECase(SHN_HEXAGON_SCOMMON_4);
+  ECase(SHN_HEXAGON_SCOMMON_8);
+#undef ECase
+  IO.enumFallback<Hex32>(Value);
 }
 
 void ScalarEnumerationTraits<ELFYAML::ELF_STT>::enumeration(
@@ -554,6 +589,9 @@ void ScalarEnumerationTraits<ELFYAML::ELF_REL>::enumeration(
     break;
   case ELF::EM_ARM:
 #include "llvm/BinaryFormat/ELFRelocs/ARM.def"
+    break;
+  case ELF::EM_ARC:
+#include "llvm/BinaryFormat/ELFRelocs/ARC.def"
     break;
   case ELF::EM_RISCV:
 #include "llvm/BinaryFormat/ELFRelocs/RISCV.def"
@@ -701,12 +739,27 @@ void MappingTraits<ELFYAML::Symbol>::mapping(IO &IO, ELFYAML::Symbol &Symbol) {
   IO.mapOptional("Name", Symbol.Name, StringRef());
   IO.mapOptional("Type", Symbol.Type, ELFYAML::ELF_STT(0));
   IO.mapOptional("Section", Symbol.Section, StringRef());
+  IO.mapOptional("Index", Symbol.Index);
   IO.mapOptional("Value", Symbol.Value, Hex64(0));
   IO.mapOptional("Size", Symbol.Size, Hex64(0));
 
   MappingNormalization<NormalizedOther, uint8_t> Keys(IO, Symbol.Other);
   IO.mapOptional("Visibility", Keys->Visibility, ELFYAML::ELF_STV(0));
   IO.mapOptional("Other", Keys->Other, ELFYAML::ELF_STO(0));
+}
+
+StringRef MappingTraits<ELFYAML::Symbol>::validate(IO &IO,
+                                                   ELFYAML::Symbol &Symbol) {
+  if (Symbol.Index && Symbol.Section.data()) {
+    return "Index and Section cannot both be specified for Symbol";
+  }
+  if (Symbol.Index && *Symbol.Index == ELFYAML::ELF_SHN(ELF::SHN_XINDEX)) {
+    return "Large indexes are not supported";
+  }
+  if (Symbol.Index && *Symbol.Index < ELFYAML::ELF_SHN(ELF::SHN_LORESERVE)) {
+    return "Use a section name to define which section a symbol is defined in";
+  }
+  return StringRef();
 }
 
 void MappingTraits<ELFYAML::LocalGlobalWeakSymbols>::mapping(
@@ -853,7 +906,7 @@ void MappingTraits<ELFYAML::Relocation>::mapping(IO &IO,
   assert(Object && "The IO context is not initialized");
 
   IO.mapRequired("Offset", Rel.Offset);
-  IO.mapRequired("Symbol", Rel.Symbol);
+  IO.mapOptional("Symbol", Rel.Symbol);
 
   if (Object->Header.Machine == ELFYAML::ELF_EM(ELF::EM_MIPS) &&
       Object->Header.Class == ELFYAML::ELF_ELFCLASS(ELF::ELFCLASS64)) {

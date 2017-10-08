@@ -24,10 +24,6 @@
 
 using namespace llvm;
 
-#ifndef LLVM_BUILD_GLOBAL_ISEL
-#error "You shouldn't build this"
-#endif
-
 static bool AEABI(const ARMSubtarget &ST) {
   return ST.isTargetAEABI() || ST.isTargetGNUAEABI() || ST.isTargetMuslAEABI();
 }
@@ -83,6 +79,9 @@ ARMLegalizerInfo::ARMLegalizerInfo(const ARMSubtarget &ST) {
     for (auto Ty : {s1, s8, s16})
       setAction({Op, 1, Ty}, Legal);
   }
+
+  for (unsigned Op : {G_ASHR, G_LSHR, G_SHL})
+    setAction({Op, s32}, Legal);
 
   setAction({G_GEP, p0}, Legal);
   setAction({G_GEP, 1, s32}, Legal);

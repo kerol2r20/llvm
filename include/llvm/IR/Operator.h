@@ -456,6 +456,8 @@ public:
       if (ConstantInt *C = dyn_cast<ConstantInt>(I))
         if (C->isZero())
           continue;
+      if (isa<ConstantAggregateZero>(I))
+        continue;
       return false;
     }
     return true;
@@ -470,6 +472,12 @@ public:
         return false;
     }
     return true;
+  }
+
+  unsigned countNonConstantIndices() const {
+    return count_if(make_range(idx_begin(), idx_end()), [](const Use& use) {
+        return !isa<ConstantInt>(*use);
+      });
   }
 
   /// \brief Accumulate the constant address offset of this GEP if possible.

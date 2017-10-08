@@ -56,17 +56,12 @@ MCStreamer::MCStreamer(MCContext &Ctx)
   SectionStack.push_back(std::pair<MCSectionSubPair, MCSectionSubPair>());
 }
 
-MCStreamer::~MCStreamer() {
-  for (unsigned i = 0; i < getNumWinFrameInfos(); ++i)
-    delete WinFrameInfos[i];
-}
+MCStreamer::~MCStreamer() {}
 
 void MCStreamer::reset() {
   DwarfFrameInfos.clear();
-  for (unsigned i = 0; i < getNumWinFrameInfos(); ++i)
-    delete WinFrameInfos[i];
-  WinFrameInfos.clear();
   CurrentWinFrameInfo = nullptr;
+  WinFrameInfos.clear();
   SymbolOrdering.clear();
   SectionStack.clear();
   SectionStack.push_back(std::pair<MCSectionSubPair, MCSectionSubPair>());
@@ -105,11 +100,15 @@ void MCStreamer::EmitIntValue(uint64_t Value, unsigned Size) {
 
 /// EmitULEB128Value - Special case of EmitULEB128Value that avoids the
 /// client having to pass in a MCExpr for constant integers.
-void MCStreamer::EmitULEB128IntValue(uint64_t Value, unsigned Padding) {
+void MCStreamer::EmitPaddedULEB128IntValue(uint64_t Value, unsigned PadTo) {
   SmallString<128> Tmp;
   raw_svector_ostream OSE(Tmp);
-  encodeULEB128(Value, OSE, Padding);
+  encodeULEB128(Value, OSE, PadTo);
   EmitBytes(OSE.str());
+}
+
+void MCStreamer::EmitULEB128IntValue(uint64_t Value) {
+  EmitPaddedULEB128IntValue(Value, 0);
 }
 
 /// EmitSLEB128Value - Special case of EmitSLEB128Value that avoids the
@@ -224,8 +223,11 @@ void MCStreamer::EnsureValidDwarfFrame() {
     report_fatal_error("No open frame");
 }
 
-bool MCStreamer::EmitCVFileDirective(unsigned FileNo, StringRef Filename) {
-  return getContext().getCVContext().addFile(FileNo, Filename);
+bool MCStreamer::EmitCVFileDirective(unsigned FileNo, StringRef Filename,
+                                     ArrayRef<uint8_t> Checksum,
+                                     unsigned ChecksumKind) {
+  return getContext().getCVContext().addFile(*this, FileNo, Filename, Checksum,
+                                             ChecksumKind);
 }
 
 bool MCStreamer::EmitCVFuncIdDirective(unsigned FunctionId) {
@@ -508,6 +510,12 @@ void MCStreamer::EmitCFIWindowSave() {
   CurFrame->Instructions.push_back(Instruction);
 }
 
+void MCStreamer::EmitCFIReturnColumn(int64_t Register) {
+  EnsureValidDwarfFrame();
+  MCDwarfFrameInfo *CurFrame = getCurrentDwarfFrameInfo();
+  CurFrame->RAReg = Register;
+}
+
 void MCStreamer::EnsureValidWinFrameInfo() {
   const MCAsmInfo *MAI = Context.getAsmInfo();
   if (!MAI->usesWindowsCFI())
@@ -525,8 +533,9 @@ void MCStreamer::EmitWinCFIStartProc(const MCSymbol *Symbol) {
 
   MCSymbol *StartProc = EmitCFILabel();
 
-  WinFrameInfos.push_back(new WinEH::FrameInfo(Symbol, StartProc));
-  CurrentWinFrameInfo = WinFrameInfos.back();
+  WinFrameInfos.emplace_back(
+      llvm::make_unique<WinEH::FrameInfo>(Symbol, StartProc));
+  CurrentWinFrameInfo = WinFrameInfos.back().get();
   CurrentWinFrameInfo->TextSection = getCurrentSectionOnly();
 }
 
@@ -544,9 +553,9 @@ void MCStreamer::EmitWinCFIStartChained() {
 
   MCSymbol *StartProc = EmitCFILabel();
 
-  WinFrameInfos.push_back(new WinEH::FrameInfo(CurrentWinFrameInfo->Function,
-                                               StartProc, CurrentWinFrameInfo));
-  CurrentWinFrameInfo = WinFrameInfos.back();
+  WinFrameInfos.emplace_back(llvm::make_unique<WinEH::FrameInfo>(
+      CurrentWinFrameInfo->Function, StartProc, CurrentWinFrameInfo));
+  CurrentWinFrameInfo = WinFrameInfos.back().get();
   CurrentWinFrameInfo->TextSection = getCurrentSectionOnly();
 }
 

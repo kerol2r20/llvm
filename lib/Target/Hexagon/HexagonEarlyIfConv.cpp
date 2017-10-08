@@ -155,9 +155,7 @@ namespace {
   public:
     static char ID;
 
-    HexagonEarlyIfConversion() : MachineFunctionPass(ID) {
-      initializeHexagonEarlyIfConversionPass(*PassRegistry::getPassRegistry());
-    }
+    HexagonEarlyIfConversion() : MachineFunctionPass(ID) {}
 
     StringRef getPassName() const override {
       return "Hexagon early if conversion";
@@ -227,7 +225,7 @@ namespace {
 
 char HexagonEarlyIfConversion::ID = 0;
 
-INITIALIZE_PASS(HexagonEarlyIfConversion, "hexagon-eif",
+INITIALIZE_PASS(HexagonEarlyIfConversion, "hexagon-early-if",
   "Hexagon early if conversion", false, false)
 
 bool HexagonEarlyIfConversion::isPreheader(const MachineBasicBlock *B) const {
@@ -391,8 +389,7 @@ bool HexagonEarlyIfConversion::isValidCandidate(const MachineBasicBlock *B)
         continue;
       switch (MRI->getRegClass(R)->getID()) {
         case Hexagon::PredRegsRegClassID:
-        case Hexagon::VecPredRegsRegClassID:
-        case Hexagon::VecPredRegs128BRegClassID:
+        case Hexagon::HvxQRRegClassID:
           break;
         default:
           continue;
@@ -539,7 +536,10 @@ bool HexagonEarlyIfConversion::isProfitable(const FlowPattern &FP) const {
   auto TotalCount = [] (const MachineBasicBlock *B, unsigned &Spare) {
     if (!B)
       return 0u;
-    unsigned T = std::distance(B->begin(), B->getFirstTerminator());
+    unsigned T = std::count_if(B->begin(), B->getFirstTerminator(),
+                               [](const MachineInstr &MI) {
+                                 return !MI.isMetaInstruction();
+                               });
     if (T < HEXAGON_PACKET_SIZE)
       Spare += HEXAGON_PACKET_SIZE-T;
     return T;
@@ -770,17 +770,11 @@ unsigned HexagonEarlyIfConversion::buildMux(MachineBasicBlock *B,
     case Hexagon::DoubleRegsRegClassID:
       Opc = Hexagon::PS_pselect;
       break;
-    case Hexagon::VectorRegsRegClassID:
+    case Hexagon::HvxVRRegClassID:
       Opc = Hexagon::PS_vselect;
       break;
-    case Hexagon::VecDblRegsRegClassID:
+    case Hexagon::HvxWRRegClassID:
       Opc = Hexagon::PS_wselect;
-      break;
-    case Hexagon::VectorRegs128BRegClassID:
-      Opc = Hexagon::PS_vselect_128B;
-      break;
-    case Hexagon::VecDblRegs128BRegClassID:
-      Opc = Hexagon::PS_wselect_128B;
       break;
     default:
       llvm_unreachable("unexpected register type");

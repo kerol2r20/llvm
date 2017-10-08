@@ -35,7 +35,6 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Use.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
@@ -45,6 +44,10 @@
 #include <iterator>
 
 namespace llvm {
+
+namespace Intrinsic {
+enum ID : unsigned;
+}
 
 template <typename FunTy = const Function,
           typename BBTy = const BasicBlock,
@@ -107,12 +110,12 @@ public:
 
   /// Return true if the callsite is an indirect call.
   bool isIndirectCall() const {
-    Value *V = getCalledValue();
+    const Value *V = getCalledValue();
     if (!V)
       return false;
     if (isa<FunTy>(V) || isa<Constant>(V))
       return false;
-    if (CallInst *CI = dyn_cast<CallInst>(getInstruction())) {
+    if (const CallInst *CI = dyn_cast<CallInst>(getInstruction())) {
       if (CI->isInlineAsm())
         return false;
     }
@@ -424,6 +427,11 @@ public:
   /// Return true if the call should not be treated as a call to a builtin.
   bool isNoBuiltin() const {
     CALLSITE_DELEGATE_GETTER(isNoBuiltin());
+  }
+
+  /// Return true if the call requires strict floating point semantics.
+  bool isStrictFP() const {
+    CALLSITE_DELEGATE_GETTER(isStrictFP());
   }
 
   /// Return true if the call should not be inlined.

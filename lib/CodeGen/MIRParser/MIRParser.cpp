@@ -120,7 +120,7 @@ public:
   bool parseCalleeSavedRegister(PerFunctionMIParsingState &PFS,
                                 std::vector<CalleeSavedInfo> &CSIInfo,
                                 const yaml::StringValue &RegisterSource,
-                                int FrameIdx);
+                                bool IsRestored, int FrameIdx);
 
   bool parseStackObjectsDebugInfo(PerFunctionMIParsingState &PFS,
                                   const yaml::MachineStackObject &Object,
@@ -595,7 +595,7 @@ bool MIRParserImpl::initializeFrameInfo(PerFunctionMIParsingState &PFS,
                    Twine("redefinition of fixed stack object '%fixed-stack.") +
                        Twine(Object.ID.Value) + "'");
     if (parseCalleeSavedRegister(PFS, CSIInfo, Object.CalleeSavedRegister,
-                                 ObjectIdx))
+                                 Object.CalleeSavedRestored, ObjectIdx))
       return true;
   }
 
@@ -628,7 +628,7 @@ bool MIRParserImpl::initializeFrameInfo(PerFunctionMIParsingState &PFS,
                    Twine("redefinition of stack object '%stack.") +
                        Twine(Object.ID.Value) + "'");
     if (parseCalleeSavedRegister(PFS, CSIInfo, Object.CalleeSavedRegister,
-                                 ObjectIdx))
+                                 Object.CalleeSavedRestored, ObjectIdx))
       return true;
     if (Object.LocalOffset)
       MFI.mapLocalFrameObject(ObjectIdx, Object.LocalOffset.getValue());
@@ -653,14 +653,16 @@ bool MIRParserImpl::initializeFrameInfo(PerFunctionMIParsingState &PFS,
 
 bool MIRParserImpl::parseCalleeSavedRegister(PerFunctionMIParsingState &PFS,
     std::vector<CalleeSavedInfo> &CSIInfo,
-    const yaml::StringValue &RegisterSource, int FrameIdx) {
+    const yaml::StringValue &RegisterSource, bool IsRestored, int FrameIdx) {
   if (RegisterSource.Value.empty())
     return false;
   unsigned Reg = 0;
   SMDiagnostic Error;
   if (parseNamedRegisterReference(PFS, Reg, RegisterSource.Value, Error))
     return error(Error, RegisterSource.SourceRange);
-  CSIInfo.push_back(CalleeSavedInfo(Reg, FrameIdx));
+  CalleeSavedInfo CSI(Reg, FrameIdx);
+  CSI.setRestored(IsRestored);
+  CSIInfo.push_back(CSI);
   return false;
 }
 
@@ -719,6 +721,10 @@ bool MIRParserImpl::initializeConstantPool(PerFunctionMIParsingState &PFS,
   const auto &M = *MF.getFunction()->getParent();
   SMDiagnostic Error;
   for (const auto &YamlConstant : YamlMF.Constants) {
+    if (YamlConstant.IsTargetSpecific)
+      // FIXME: Support target-specific constant pools
+      return error(YamlConstant.Value.SourceRange.Start,
+                   "Can't parse target-specific constant pool entries yet");
     const Constant *Value = dyn_cast_or_null<Constant>(
         parseConstantValue(YamlConstant.Value.Value, Error, M));
     if (!Value)

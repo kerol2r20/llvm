@@ -641,15 +641,9 @@ std::error_code mapped_file_region::init(int FD, uint64_t Offset,
   return std::error_code();
 }
 
-mapped_file_region::mapped_file_region(int fd, mapmode mode, uint64_t length,
+mapped_file_region::mapped_file_region(int fd, mapmode mode, size_t length,
                                        uint64_t offset, std::error_code &ec)
     : Size(length), Mapping() {
-  // Make sure that the requested size fits within SIZE_T.
-  if (length > std::numeric_limits<size_t>::max()) {
-    ec = make_error_code(errc::invalid_argument);
-    return;
-  }
-
   ec = init(fd, offset, mode);
   if (ec)
     Mapping = nullptr;
@@ -660,7 +654,7 @@ mapped_file_region::~mapped_file_region() {
     ::munmap(Mapping, Size);
 }
 
-uint64_t mapped_file_region::size() const {
+size_t mapped_file_region::size() const {
   assert(Mapping && "Mapping failed but used anyway!");
   return Size;
 }
@@ -803,53 +797,6 @@ std::error_code openFileForWrite(const Twine &Name, int &ResultFD,
   int r = fcntl(ResultFD, F_SETFD, FD_CLOEXEC);
   (void)r;
   assert(r == 0 && "fcntl(F_SETFD, FD_CLOEXEC) failed");
-#endif
-  return std::error_code();
-}
-
-std::error_code getPathFromOpenFD(int FD, SmallVectorImpl<char> &ResultPath) {
-  if (FD < 0)
-    return make_error_code(errc::bad_file_descriptor);
-
-#if defined(F_GETPATH)
-  // When F_GETPATH is availble, it is the quickest way to get
-  // the path from a file descriptor.
-  ResultPath.reserve(MAXPATHLEN);
-  if (::fcntl(FD, F_GETPATH, ResultPath.begin()) == -1)
-    return std::error_code(errno, std::generic_category());
-
-  ResultPath.set_size(strlen(ResultPath.begin()));
-#else
-  // If we have a /proc filesystem mounted, we can quickly establish the
-  // real name of the file with readlink. Otherwise, we don't know how to
-  // get the filename from a file descriptor. Give up.
-  if (!fs::hasProcSelfFD())
-    return make_error_code(errc::function_not_supported);
-
-  ResultPath.reserve(PATH_MAX);
-  char ProcPath[64];
-  snprintf(ProcPath, sizeof(ProcPath), "/proc/self/fd/%d", FD);
-  ssize_t CharCount = ::readlink(ProcPath, ResultPath.begin(), ResultPath.capacity());
-  if (CharCount < 0)
-      return std::error_code(errno, std::generic_category());
-
-  // Was the filename truncated?
-  if (static_cast<size_t>(CharCount) == ResultPath.capacity()) {
-    // Use lstat to get the size of the filename
-    struct stat sb;
-    if (::lstat(ProcPath, &sb) < 0)
-      return std::error_code(errno, std::generic_category());
-
-    ResultPath.reserve(sb.st_size + 1);
-    CharCount = ::readlink(ProcPath, ResultPath.begin(), ResultPath.capacity());
-    if (CharCount < 0)
-      return std::error_code(errno, std::generic_category());
-
-    // Test for race condition: did the link size change?
-    if (CharCount > sb.st_size)
-      return std::error_code(ENAMETOOLONG, std::generic_category());
-  }
-  ResultPath.set_size(static_cast<size_t>(CharCount));
 #endif
   return std::error_code();
 }

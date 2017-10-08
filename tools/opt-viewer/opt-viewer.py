@@ -59,7 +59,10 @@ class SourceFileRenderer:
 
     def render_source_lines(self, stream, line_remarks):
         file_text = stream.read()
-        html_highlighted = highlight(file_text, self.cpp_lexer, self.html_formatter)
+        html_highlighted = highlight(
+            file_text,
+            self.cpp_lexer,
+            self.html_formatter).decode('utf-8')
 
         # Take off the header and footer, these must be
         #   reapplied line-wise, within the page structure
@@ -255,7 +258,7 @@ if __name__ == '__main__':
 
     print_progress = not args.no_progress_indicator
 
-    files = optrecord.find_opt_files(args.yaml_dirs_or_files)
+    files = optrecord.find_opt_files(*args.yaml_dirs_or_files)
     if not files:
         parser.error("No *.opt.yaml files found")
         sys.exit(1)

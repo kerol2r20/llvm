@@ -486,7 +486,9 @@ unsigned getInitialPSInputAddr(const Function &F) {
 bool isShader(CallingConv::ID cc) {
   switch(cc) {
     case CallingConv::AMDGPU_VS:
+    case CallingConv::AMDGPU_LS:
     case CallingConv::AMDGPU_HS:
+    case CallingConv::AMDGPU_ES:
     case CallingConv::AMDGPU_GS:
     case CallingConv::AMDGPU_PS:
     case CallingConv::AMDGPU_CS:
@@ -508,7 +510,9 @@ bool isEntryFunctionCC(CallingConv::ID CC) {
   case CallingConv::AMDGPU_GS:
   case CallingConv::AMDGPU_PS:
   case CallingConv::AMDGPU_CS:
+  case CallingConv::AMDGPU_ES:
   case CallingConv::AMDGPU_HS:
+  case CallingConv::AMDGPU_LS:
     return true;
   default:
     return false;
@@ -529,6 +533,10 @@ bool isVI(const MCSubtargetInfo &STI) {
 
 bool isGFX9(const MCSubtargetInfo &STI) {
   return STI.getFeatureBits()[AMDGPU::FeatureGFX9];
+}
+
+bool isGCN3Encoding(const MCSubtargetInfo &STI) {
+  return STI.getFeatureBits()[AMDGPU::FeatureGCN3Encoding];
 }
 
 bool isSGPR(unsigned Reg, const MCRegisterInfo* TRI) {
@@ -740,7 +748,9 @@ bool isArgPassedInSGPR(const Argument *A) {
   case CallingConv::SPIR_KERNEL:
     return true;
   case CallingConv::AMDGPU_VS:
+  case CallingConv::AMDGPU_LS:
   case CallingConv::AMDGPU_HS:
+  case CallingConv::AMDGPU_ES:
   case CallingConv::AMDGPU_GS:
   case CallingConv::AMDGPU_PS:
   case CallingConv::AMDGPU_CS:
@@ -773,16 +783,15 @@ bool isUniformMMO(const MachineMemOperand *MMO) {
 }
 
 int64_t getSMRDEncodedOffset(const MCSubtargetInfo &ST, int64_t ByteOffset) {
-  if (isSI(ST) || isCI(ST))
-    return ByteOffset >> 2;
-
-  return ByteOffset;
+  if (isGCN3Encoding(ST))
+    return ByteOffset;
+  return ByteOffset >> 2;
 }
 
 bool isLegalSMRDImmOffset(const MCSubtargetInfo &ST, int64_t ByteOffset) {
   int64_t EncodedOffset = getSMRDEncodedOffset(ST, ByteOffset);
-  return isSI(ST) || isCI(ST) ? isUInt<8>(EncodedOffset) :
-                                isUInt<20>(EncodedOffset);
+  return isGCN3Encoding(ST) ?
+    isUInt<20>(EncodedOffset) : isUInt<8>(EncodedOffset);
 }
 } // end namespace AMDGPU
 

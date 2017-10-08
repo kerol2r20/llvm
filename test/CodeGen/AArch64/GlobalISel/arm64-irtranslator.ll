@@ -32,14 +32,14 @@ define i64 @muli64(i64 %arg1, i64 %arg2) {
 ; CHECK-LABEL: name: allocai64
 ; CHECK: stack:
 ; CHECK-NEXT:   - { id: 0, name: ptr1, type: default, offset: 0, size: 8, alignment: 8,
-; CHECK-NEXT:       stack-id: 0, callee-saved-register: '', di-variable: '', di-expression: '',
-; CHECK-NEXT:       di-location: '' }
+; CHECK-NEXT:       stack-id: 0, callee-saved-register: '', callee-saved-restored: true,
+; CHECK-NEXT: di-variable: '', di-expression: '', di-location: '' }
 ; CHECK-NEXT:   - { id: 1, name: ptr2, type: default, offset: 0, size: 8, alignment: 1,
-; CHECK-NEXT:       stack-id: 0, callee-saved-register: '', di-variable: '', di-expression: '',
-; CHECK-NEXT:       di-location: '' }
+; CHECK-NEXT:       stack-id: 0, callee-saved-register: '', callee-saved-restored: true,
+; CHECK-NEXT:       di-variable: '', di-expression: '', di-location: '' }
 ; CHECK-NEXT:   - { id: 2, name: ptr3, type: default, offset: 0, size: 128, alignment: 8,
-; CHECK-NEXT:       stack-id: 0, callee-saved-register: '', di-variable: '', di-expression: '',
-; CHECK-NEXT:       di-location: '' }
+; CHECK-NEXT:       stack-id: 0, callee-saved-register: '', callee-saved-restored: true,
+; CHECK-NEXT:       di-variable: '', di-expression: '', di-location: '' }
 ; CHECK-NEXT:   - { id: 3, name: ptr4, type: default, offset: 0, size: 1, alignment: 8,
 ; CHECK: %{{[0-9]+}}(p0) = G_FRAME_INDEX %stack.0.ptr1
 ; CHECK: %{{[0-9]+}}(p0) = G_FRAME_INDEX %stack.1.ptr2
@@ -170,7 +170,7 @@ false:
 ; CHECK: %[[regretc200:[0-9]+]](s32) = G_ADD %0, %[[reg2]]
 ;
 ; CHECK: [[BB_RET]]:
-; CHECK-NEXT: %[[regret:[0-9]+]](s32) = PHI %[[regretdefault]](s32), %[[BB_DEFAULT]], %[[regretc100]](s32), %[[BB_CASE100]]
+; CHECK-NEXT: %[[regret:[0-9]+]](s32) = G_PHI %[[regretdefault]](s32), %[[BB_DEFAULT]], %[[regretc100]](s32), %[[BB_CASE100]]
 ; CHECK:  %w0 = COPY %[[regret]](s32)
 ; CHECK:  RET_ReallyLR implicit %w0
 ;
@@ -211,7 +211,7 @@ return:
 ; CHECK: G_BR %[[PHI_BLOCK]]
 ;
 ; CHECK: [[PHI_BLOCK]]:
-; CHECK-NEXT: PHI %{{.*}}(s32), %[[NOTCASE57_BLOCK:bb.[0-9]+.entry]], %{{.*}}(s32),
+; CHECK-NEXT: G_PHI %{{.*}}(s32), %[[NOTCASE57_BLOCK:bb.[0-9]+.entry]], %{{.*}}(s32),
 ;
 define i32 @test_cfg_remap(i32 %in) {
 entry:
@@ -230,7 +230,7 @@ phi.block:
 }
 
 ; CHECK-LABEL: name: test_cfg_remap_multiple_preds
-; CHECK: PHI [[ENTRY:%.*]](s32), %bb.{{[0-9]+}}.entry, [[ENTRY]](s32), %bb.{{[0-9]+}}.entry
+; CHECK: G_PHI [[ENTRY:%.*]](s32), %bb.{{[0-9]+}}.entry, [[ENTRY]](s32), %bb.{{[0-9]+}}.entry
 define i32 @test_cfg_remap_multiple_preds(i32 %in) {
 entry:
   switch i32 %in, label %odd [i32 1, label %next
@@ -521,7 +521,7 @@ define void @intrinsics(i32 %cur, i32 %bits) {
 ; CHECK: [[FALSE]]:
 ; CHECK:     [[RES2:%[0-9]+]](s32) = G_LOAD
 
-; CHECK:     [[RES:%[0-9]+]](s32) = PHI [[RES1]](s32), %[[TRUE]], [[RES2]](s32), %[[FALSE]]
+; CHECK:     [[RES:%[0-9]+]](s32) = G_PHI [[RES1]](s32), %[[TRUE]], [[RES2]](s32), %[[FALSE]]
 ; CHECK:     %w0 = COPY [[RES]]
 define i32 @test_phi(i32* %addr1, i32* %addr2, i1 %tst) {
   br i1 %tst, label %true, label %false

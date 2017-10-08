@@ -17,6 +17,12 @@ import functools
 from multiprocessing import Lock
 import os, os.path
 import subprocess
+try:
+    # The previously builtin function `intern()` was moved
+    # to the `sys` module in Python 3.
+    from sys import intern
+except:
+    pass
 
 import optpmap
 
@@ -74,7 +80,7 @@ class Remark(yaml.YAMLObject):
 
         def _reduce_memory_dict(old_dict):
             new_dict = dict()
-            for (k, v) in old_dict.iteritems():
+            for (k, v) in iteritems(old_dict):
                 if type(k) is str:
                     k = intern(k)
 
@@ -140,7 +146,7 @@ class Remark(yaml.YAMLObject):
             del mapping['DebugLoc']
 
         assert(len(mapping) == 1)
-        (key, value) = mapping.items()[0]
+        (key, value) = list(mapping.items())[0]
 
         if key == 'Caller' or key == 'Callee':
             value = cgi.escape(demangle(value))
@@ -173,7 +179,7 @@ class Remark(yaml.YAMLObject):
     @property
     def RelativeHotness(self):
         if self.max_hotness:
-            return "{}%".format(int(round(self.Hotness * 100 / self.max_hotness)))
+            return "{0:.2f}%".format(self.Hotness * 100. / self.max_hotness)
         else:
             return ''
 
@@ -276,7 +282,7 @@ def gather_results(filenames, num_jobs, should_print_progress):
     return all_remarks, file_remarks, max_hotness != 0
 
 
-def find_opt_files(dirs_or_files):
+def find_opt_files(*dirs_or_files):
     all = []
     for dir_or_file in dirs_or_files:
         if os.path.isfile(dir_or_file):

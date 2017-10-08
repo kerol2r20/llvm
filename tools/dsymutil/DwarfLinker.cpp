@@ -185,13 +185,14 @@ class CompileUnit {
 public:
   /// Information gathered about a DIE in the object file.
   struct DIEInfo {
-    int64_t AddrAdjust; ///< Address offset to apply to the described entity.
-    DeclContext *Ctxt;  ///< ODR Declaration context.
-    DIE *Clone;         ///< Cloned version of that DIE.
-    uint32_t ParentIdx; ///< The index of this DIE's parent.
-    bool Keep : 1;      ///< Is the DIE part of the linked output?
-    bool InDebugMap : 1;///< Was this DIE's entity found in the map?
-    bool Prune : 1;     ///< Is this a pure forward declaration we can strip?
+    int64_t AddrAdjust;  ///< Address offset to apply to the described entity.
+    DeclContext *Ctxt;   ///< ODR Declaration context.
+    DIE *Clone;          ///< Cloned version of that DIE.
+    uint32_t ParentIdx;  ///< The index of this DIE's parent.
+    bool Keep : 1;       ///< Is the DIE part of the linked output?
+    bool InDebugMap : 1; ///< Was this DIE's entity found in the map?
+    bool Prune : 1;      ///< Is this a pure forward declaration we can strip?
+    bool Incomplete : 1; ///< Does DIE transitively refer an incomplete decl?
   };
 
   CompileUnit(DWARFUnit &OrigUnit, unsigned ID, bool CanUseODR,
@@ -524,6 +525,9 @@ public:
   /// Emit the string table described by \p Pool.
   void emitStrings(const NonRelocatableStringpool &Pool);
 
+  /// Emit the swift_ast section stored in \p Buffers.
+  void emitSwiftAST(const std::vector<MemoryBufferRef> &Buffers);
+
   /// Emit debug_ranges for \p FuncRange by translating the
   /// original \p Entries.
   void emitRangesEntries(
@@ -591,7 +595,7 @@ bool DwarfStreamer::init(Triple TheTriple, StringRef OutputFilename) {
 
   MOFI.reset(new MCObjectFileInfo);
   MC.reset(new MCContext(MAI.get(), MRI.get(), MOFI.get()));
-  MOFI->InitMCObjectFileInfo(TheTriple, /*PIC*/ false, CodeModel::Default, *MC);
+  MOFI->InitMCObjectFileInfo(TheTriple, /*PIC*/ false, *MC);
 
   MCTargetOptions Options;
   MAB = TheTarget->createMCAsmBackend(*MRI, TripleName, "", Options);
@@ -705,6 +709,15 @@ void DwarfStreamer::emitStrings(const NonRelocatableStringpool &Pool) {
        Entry = Pool.getNextEntry(Entry))
     Asm->OutStreamer->EmitBytes(
         StringRef(Entry->getKey().data(), Entry->getKey().size() + 1));
+}
+
+/// Emit the swift_ast section stored in \p Buffers.
+void DwarfStreamer::emitSwiftAST(const std::vector<MemoryBufferRef> &Buffers) {
+  MCSection *SwiftASTSection = MOFI->getDwarfSwiftASTSection();
+  SwiftASTSection->setAlignment(1 << 5);
+  MS->SwitchSection(SwiftASTSection);
+  for (auto Buf : Buffers)
+    MS->EmitBytes(Buf.getBuffer());
 }
 
 /// Emit the debug_range section contents for \p FuncRange by
@@ -1198,8 +1211,9 @@ private:
   /// @{
   /// Recursively walk the \p DIE tree and look for DIEs to
   /// keep. Store that information in \p CU's DIEInfo.
-  void lookForDIEsToKeep(RelocationManager &RelocMgr,
-                         const DWARFDie &DIE,
+  ///
+  /// The return value indicates whether the DIE is incomplete.
+  bool lookForDIEsToKeep(RelocationManager &RelocMgr, const DWARFDie &DIE,
                          const DebugMapObject &DMO, CompileUnit &CU,
                          unsigned Flags);
 
@@ -1493,8 +1507,12 @@ static DWARFDie resolveDIEReference(
   uint64_t RefOffset = *RefValue.getAsReference();
 
   if ((RefCU = getUnitForOffset(Units, RefOffset)))
-    if (const auto RefDie = RefCU->getOrigUnit().getDIEForOffset(RefOffset))
-      return RefDie;
+    if (const auto RefDie = RefCU->getOrigUnit().getDIEForOffset(RefOffset)) {
+      // In a file with broken references, an attribute might point to a NULL
+      // DIE.
+      if(!RefDie.isNULL())
+        return RefDie;
+    }
 
   Linker.reportWarning("could not find referenced DIE", &DIE);
   return DWARFDie();
@@ -1741,8 +1759,12 @@ void DwarfLinker::reportWarning(const Twine &Warning,
   if (!Options.Verbose || !DIE)
     return;
 
+  DIDumpOptions DumpOpts;
+  DumpOpts.RecurseDepth = 0;
+  DumpOpts.Verbose = Options.Verbose;
+
   errs() << "    in DIE:\n";
-  DIE->dump(errs(), 0 /* RecurseDepth */, 6 /* Indent */);
+  DIE->dump(errs(), 6 /* Indent */, DumpOpts);
 }
 
 bool DwarfLinker::createStreamer(const Triple &TheTriple,
@@ -1782,7 +1804,8 @@ static bool analyzeContextInfo(const DWARFDie &DIE,
   //
   // We treat non-C++ modules like namespaces for this reason.
   if (DIE.getTag() == dwarf::DW_TAG_module && ParentIdx == 0 &&
-      dwarf::toString(DIE.find(dwarf::DW_AT_name), "") != CU.getClangModuleName()) {
+      dwarf::toString(DIE.find(dwarf::DW_AT_name), "") !=
+          CU.getClangModuleName()) {
     InImportedModule = true;
   }
 
@@ -2105,8 +2128,12 @@ unsigned DwarfLinker::shouldKeepVariableDIE(RelocationManager &RelocMgr,
       (Flags & TF_InFunctionScope))
     return Flags;
 
-  if (Options.Verbose)
-    DIE.dump(outs(), 0, 8 /* Indent */);
+  if (Options.Verbose) {
+    DIDumpOptions DumpOpts;
+    DumpOpts.RecurseDepth = 0;
+    DumpOpts.Verbose = Options.Verbose;
+    DIE.dump(outs(), 8 /* Indent */, DumpOpts);
+  }
 
   return Flags | TF_Keep;
 }
@@ -2137,8 +2164,12 @@ unsigned DwarfLinker::shouldKeepSubprogramDIE(
       !RelocMgr.hasValidRelocation(LowPcOffset, LowPcEndOffset, MyInfo))
     return Flags;
 
-  if (Options.Verbose)
-    DIE.dump(outs(), 0, 8 /* Indent */);
+  if (Options.Verbose) {
+    DIDumpOptions DumpOpts;
+    DumpOpts.RecurseDepth = 0;
+    DumpOpts.Verbose = Options.Verbose;
+    DIE.dump(outs(), 8 /* Indent */, DumpOpts);
+  }
 
   Flags |= TF_Keep;
 
@@ -2196,6 +2227,11 @@ void DwarfLinker::keepDIEAndDependencies(RelocationManager &RelocMgr,
   DWARFUnit &Unit = CU.getOrigUnit();
   MyInfo.Keep = true;
 
+  // We're looking for incomplete types.
+  MyInfo.Incomplete = Die.getTag() != dwarf::DW_TAG_subprogram &&
+                      Die.getTag() != dwarf::DW_TAG_member &&
+                      dwarf::toUnsigned(Die.find(dwarf::DW_AT_declaration), 0);
+
   // First mark all the parent chain as kept.
   unsigned AncestorIdx = MyInfo.ParentIdx;
   while (!CU.getInfo(AncestorIdx).Keep) {
@@ -2211,7 +2247,7 @@ void DwarfLinker::keepDIEAndDependencies(RelocationManager &RelocMgr,
   const auto *Abbrev = Die.getAbbreviationDeclarationPtr();
   uint32_t Offset = Die.getOffset() + getULEB128Size(Abbrev->getCode());
 
-  // Mark all DIEs referenced through atttributes as kept.
+  // Mark all DIEs referenced through attributes as kept.
   for (const auto &AttrSpec : Abbrev->attributes()) {
     DWARFFormValue Val(AttrSpec.Form);
 
@@ -2251,6 +2287,16 @@ void DwarfLinker::keepDIEAndDependencies(RelocationManager &RelocMgr,
       unsigned ODRFlag = UseODR ? TF_ODR : 0;
       lookForDIEsToKeep(RelocMgr, RefDie, DMO, *ReferencedCU,
                         TF_Keep | TF_DependencyWalk | ODRFlag);
+
+      // The incomplete property is propagated if the current DIE is complete
+      // but references an incomplete DIE.
+      if (Info.Incomplete && !MyInfo.Incomplete &&
+          (Die.getTag() == dwarf::DW_TAG_typedef ||
+           Die.getTag() == dwarf::DW_TAG_member ||
+           Die.getTag() == dwarf::DW_TAG_reference_type ||
+           Die.getTag() == dwarf::DW_TAG_ptr_to_member_type ||
+           Die.getTag() == dwarf::DW_TAG_pointer_type))
+        MyInfo.Incomplete = true;
     }
   }
 }
@@ -2267,7 +2313,9 @@ void DwarfLinker::keepDIEAndDependencies(RelocationManager &RelocMgr,
 /// also called, but during these dependency walks the file order is
 /// not respected. The TF_DependencyWalk flag tells us which kind of
 /// traversal we are currently doing.
-void DwarfLinker::lookForDIEsToKeep(RelocationManager &RelocMgr,
+///
+/// The return value indicates whether the DIE is incomplete.
+bool DwarfLinker::lookForDIEsToKeep(RelocationManager &RelocMgr,
                                     const DWARFDie &Die,
                                     const DebugMapObject &DMO, CompileUnit &CU,
                                     unsigned Flags) {
@@ -2275,13 +2323,13 @@ void DwarfLinker::lookForDIEsToKeep(RelocationManager &RelocMgr,
   CompileUnit::DIEInfo &MyInfo = CU.getInfo(Idx);
   bool AlreadyKept = MyInfo.Keep;
   if (MyInfo.Prune)
-    return;
+    return true;
 
   // If the Keep flag is set, we are marking a required DIE's
   // dependencies. If our target is already marked as kept, we're all
   // set.
   if ((Flags & TF_DependencyWalk) && AlreadyKept)
-    return;
+    return MyInfo.Incomplete;
 
   // We must not call shouldKeepDIE while called from keepDIEAndDependencies,
   // because it would screw up the relocation finding logic.
@@ -2303,10 +2351,19 @@ void DwarfLinker::lookForDIEsToKeep(RelocationManager &RelocMgr,
     Flags &= ~TF_ParentWalk;
 
   if (!Die.hasChildren() || (Flags & TF_ParentWalk))
-    return;
+    return MyInfo.Incomplete;
 
-  for (auto Child: Die.children())
-    lookForDIEsToKeep(RelocMgr, Child, DMO, CU, Flags);
+  bool Incomplete = false;
+  for (auto Child : Die.children()) {
+    Incomplete |= lookForDIEsToKeep(RelocMgr, Child, DMO, CU, Flags);
+
+    // If any of the members are incomplete we propagate the incompleteness.
+    if (!MyInfo.Incomplete && Incomplete &&
+        (Die.getTag() == dwarf::DW_TAG_structure_type ||
+         Die.getTag() == dwarf::DW_TAG_class_type))
+      MyInfo.Incomplete = true;
+  }
+  return MyInfo.Incomplete;
 }
 
 /// Assign an abbreviation numer to \p Abbrev.
@@ -2716,7 +2773,7 @@ DIE *DwarfLinker::DIECloner::cloneDIE(
 
   assert(Die->getTag() == InputDIE.getTag());
   Die->setOffset(OutOffset);
-  if ((Unit.hasODR() || Unit.isClangModule()) &&
+  if ((Unit.hasODR() || Unit.isClangModule()) && !Info.Incomplete &&
       Die->getTag() != dwarf::DW_TAG_namespace && Info.Ctxt &&
       Info.Ctxt != Unit.getInfo(Info.ParentIdx).Ctxt &&
       !Info.Ctxt->getCanonicalDIEOffset()) {
@@ -2752,11 +2809,13 @@ DIE *DwarfLinker::DIECloner::cloneDIE(
     // file might be start address of another function which got moved
     // independantly by the linker). The computation of the actual
     // high_pc value is done in cloneAddressAttribute().
-    AttrInfo.OrigHighPc = dwarf::toAddress(InputDIE.find(dwarf::DW_AT_high_pc), 0);
+    AttrInfo.OrigHighPc =
+        dwarf::toAddress(InputDIE.find(dwarf::DW_AT_high_pc), 0);
     // Also store the low_pc. It might get relocated in an
     // inline_subprogram that happens at the beginning of its
     // inlining function.
-    AttrInfo.OrigLowPc = dwarf::toAddress(InputDIE.find(dwarf::DW_AT_low_pc), UINT64_MAX);
+    AttrInfo.OrigLowPc =
+        dwarf::toAddress(InputDIE.find(dwarf::DW_AT_low_pc), UINT64_MAX);
   }
 
   // Reset the Offset to 0 as we will be working on the local copy of
@@ -2877,7 +2936,8 @@ void DwarfLinker::patchRangesForUnit(const CompileUnit &Unit,
   auto InvalidRange = FunctionRanges.end(), CurrRange = InvalidRange;
   DWARFUnit &OrigUnit = Unit.getOrigUnit();
   auto OrigUnitDie = OrigUnit.getUnitDIE(false);
-  uint64_t OrigLowPc = dwarf::toAddress(OrigUnitDie.find(dwarf::DW_AT_low_pc), -1ULL);
+  uint64_t OrigLowPc =
+      dwarf::toAddress(OrigUnitDie.find(dwarf::DW_AT_low_pc), -1ULL);
   // Ranges addresses are based on the unit's low_pc. Compute the
   // offset we need to apply to adapt to the new unit's low_pc.
   int64_t UnitPcOffset = 0;
@@ -3281,8 +3341,8 @@ void DwarfLinker::loadClangModule(StringRef Filename, StringRef ModulePath,
   else
     sys::path::append(Path, Filename);
   BinaryHolder ObjHolder(Options.Verbose);
-  auto &Obj =
-      ModuleMap.addDebugMapObject(Path, sys::TimePoint<std::chrono::seconds>());
+  auto &Obj = ModuleMap.addDebugMapObject(
+      Path, sys::TimePoint<std::chrono::seconds>(), MachO::N_OSO);
   auto ErrOrObj = loadObject(ObjHolder, Obj, ModuleMap);
   if (!ErrOrObj) {
     // Try and emit more helpful warnings by applying some heuristics.
@@ -3325,8 +3385,10 @@ void DwarfLinker::loadClangModule(StringRef Filename, StringRef ModulePath,
   auto DwarfContext = DWARFContext::create(*ErrOrObj);
   RelocationManager RelocMgr(*this);
   for (const auto &CU : DwarfContext->compile_units()) {
-    auto CUDie = CU->getUnitDIE(false);
+    maybeUpdateMaxDwarfVersion(CU->getVersion());
+
     // Recursively get all modules imported by this one.
+    auto CUDie = CU->getUnitDIE(false);
     if (!registerModuleReference(CUDie, *CU, ModuleMap, Indent)) {
       if (Unit) {
         errs() << Filename << ": Clang modules are expected to have exactly"
@@ -3356,6 +3418,8 @@ void DwarfLinker::loadClangModule(StringRef Filename, StringRef ModulePath,
       Unit->markEverythingAsKept();
     }
   }
+  if (!Unit->getOrigUnit().getUnitDIE().hasChildren())
+    return;
   if (Options.Verbose) {
     outs().indent(Indent);
     outs() << "cloning .debug_info from " << Filename << "\n";
@@ -3423,6 +3487,19 @@ bool DwarfLinker::link(const DebugMap &Map) {
 
     if (Options.Verbose)
       outs() << "DEBUG MAP OBJECT: " << Obj->getObjectFilename() << "\n";
+
+    // N_AST objects (swiftmodule files) should get dumped directly into the
+    // appropriate DWARF section.
+    if (Obj->getType() == MachO::N_AST) {
+      auto ErrOrMemBufferRefs = BinHolder.GetMemoryBuffersForFile(
+          Obj->getObjectFilename(), Obj->getTimestamp());
+      if (ErrOrMemBufferRefs.getError())
+        continue;
+      if (!Options.NoOutput)
+        Streamer->emitSwiftAST(ErrOrMemBufferRefs.get());
+      continue;
+    }
+
     auto ErrOrObj = loadObject(BinHolder, *Obj, Map);
     if (!ErrOrObj)
       continue;
@@ -3444,7 +3521,10 @@ bool DwarfLinker::link(const DebugMap &Map) {
       auto CUDie = CU->getUnitDIE(false);
       if (Options.Verbose) {
         outs() << "Input compilation unit:";
-        CUDie.dump(outs(), 0);
+        DIDumpOptions DumpOpts;
+        DumpOpts.RecurseDepth = 0;
+        DumpOpts.Verbose = Options.Verbose;
+        CUDie.dump(outs(), 0, DumpOpts);
       }
 
       if (!registerModuleReference(CUDie, *CU, ModuleMap)) {

@@ -736,6 +736,10 @@ Instruction *InstCombiner::visitFMul(BinaryOperator &I) {
       }
     }
 
+    // Handle specials cases for FMul with selects feeding the operation
+    if (Value *V = SimplifySelectsFeedingBinaryOp(I, Op0, Op1))
+      return replaceInstUsesWith(I, V);
+
     // (X*Y) * X => (X*X) * Y where Y != X
     //  The purpose is two-fold:
     //   1) to form a power expression (of X).
@@ -774,24 +778,23 @@ Instruction *InstCombiner::visitFMul(BinaryOperator &I) {
   return Changed ? &I : nullptr;
 }
 
-/// Try to fold a divide or remainder of a select instruction.
-bool InstCombiner::SimplifyDivRemOfSelect(BinaryOperator &I) {
-  SelectInst *SI = cast<SelectInst>(I.getOperand(1));
-
-  // div/rem X, (Cond ? 0 : Y) -> div/rem X, Y
-  int NonNullOperand = -1;
-  if (Constant *ST = dyn_cast<Constant>(SI->getOperand(1)))
-    if (ST->isNullValue())
-      NonNullOperand = 2;
-  // div/rem X, (Cond ? Y : 0) -> div/rem X, Y
-  if (Constant *ST = dyn_cast<Constant>(SI->getOperand(2)))
-    if (ST->isNullValue())
-      NonNullOperand = 1;
-
-  if (NonNullOperand == -1)
+/// Fold a divide or remainder with a select instruction divisor when one of the
+/// select operands is zero. In that case, we can use the other select operand
+/// because div/rem by zero is undefined.
+bool InstCombiner::simplifyDivRemOfSelectWithZeroOp(BinaryOperator &I) {
+  SelectInst *SI = dyn_cast<SelectInst>(I.getOperand(1));
+  if (!SI)
     return false;
 
-  Value *SelectCond = SI->getOperand(0);
+  int NonNullOperand;
+  if (match(SI->getTrueValue(), m_Zero()))
+    // div/rem X, (Cond ? 0 : Y) -> div/rem X, Y
+    NonNullOperand = 2;
+  else if (match(SI->getFalseValue(), m_Zero()))
+    // div/rem X, (Cond ? Y : 0) -> div/rem X, Y
+    NonNullOperand = 1;
+  else
+    return false;
 
   // Change the div/rem to use 'Y' instead of the select.
   I.setOperand(1, SI->getOperand(NonNullOperand));
@@ -804,12 +807,13 @@ bool InstCombiner::SimplifyDivRemOfSelect(BinaryOperator &I) {
 
   // If the select and condition only have a single use, don't bother with this,
   // early exit.
+  Value *SelectCond = SI->getCondition();
   if (SI->use_empty() && SelectCond->hasOneUse())
     return true;
 
   // Scan the current block backward, looking for other uses of SI.
   BasicBlock::iterator BBI = I.getIterator(), BBFront = I.getParent()->begin();
-
+  Type *CondTy = SelectCond->getType();
   while (BBI != BBFront) {
     --BBI;
     // If we found a call to a function, we can't assume it will return, so
@@ -824,7 +828,8 @@ bool InstCombiner::SimplifyDivRemOfSelect(BinaryOperator &I) {
         *I = SI->getOperand(NonNullOperand);
         Worklist.Add(&*BBI);
       } else if (*I == SelectCond) {
-        *I = Builder.getInt1(NonNullOperand == 1);
+        *I = NonNullOperand == 1 ? ConstantInt::getTrue(CondTy)
+                                 : ConstantInt::getFalse(CondTy);
         Worklist.Add(&*BBI);
       }
     }
@@ -859,7 +864,7 @@ Instruction *InstCombiner::commonIDivTransforms(BinaryOperator &I) {
 
   // Handle cases involving: [su]div X, (select Cond, Y, Z)
   // This does not apply for fdiv.
-  if (isa<SelectInst>(Op1) && SimplifyDivRemOfSelect(I))
+  if (simplifyDivRemOfSelectWithZeroOp(I))
     return &I;
 
   if (Instruction *LHS = dyn_cast<Instruction>(Op0)) {
@@ -966,19 +971,6 @@ Instruction *InstCombiner::commonIDivTransforms(BinaryOperator &I) {
       return BinaryOperator::Create(I.getOpcode(), X, Op1);
   }
 
-  return nullptr;
-}
-
-/// dyn_castZExtVal - Checks if V is a zext or constant that can
-/// be truncated to Ty without losing bits.
-static Value *dyn_castZExtVal(Value *V, Type *Ty) {
-  if (ZExtInst *Z = dyn_cast<ZExtInst>(V)) {
-    if (Z->getSrcTy() == Ty)
-      return Z->getOperand(0);
-  } else if (ConstantInt *C = dyn_cast<ConstantInt>(V)) {
-    if (C->getValue().getActiveBits() <= cast<IntegerType>(Ty)->getBitWidth())
-      return ConstantExpr::getTrunc(C, Ty);
-  }
   return nullptr;
 }
 
@@ -1095,6 +1087,43 @@ static size_t visitUDivOperand(Value *Op0, Value *Op1, const BinaryOperator &I,
   return 0;
 }
 
+/// If we have zero-extended operands of an unsigned div or rem, we may be able
+/// to narrow the operation (sink the zext below the math).
+static Instruction *narrowUDivURem(BinaryOperator &I,
+                                   InstCombiner::BuilderTy &Builder) {
+  Instruction::BinaryOps Opcode = I.getOpcode();
+  Value *N = I.getOperand(0);
+  Value *D = I.getOperand(1);
+  Type *Ty = I.getType();
+  Value *X, *Y;
+  if (match(N, m_ZExt(m_Value(X))) && match(D, m_ZExt(m_Value(Y))) &&
+      X->getType() == Y->getType() && (N->hasOneUse() || D->hasOneUse())) {
+    // udiv (zext X), (zext Y) --> zext (udiv X, Y)
+    // urem (zext X), (zext Y) --> zext (urem X, Y)
+    Value *NarrowOp = Builder.CreateBinOp(Opcode, X, Y);
+    return new ZExtInst(NarrowOp, Ty);
+  }
+
+  Constant *C;
+  if ((match(N, m_OneUse(m_ZExt(m_Value(X)))) && match(D, m_Constant(C))) ||
+      (match(D, m_OneUse(m_ZExt(m_Value(X)))) && match(N, m_Constant(C)))) {
+    // If the constant is the same in the smaller type, use the narrow version.
+    Constant *TruncC = ConstantExpr::getTrunc(C, X->getType());
+    if (ConstantExpr::getZExt(TruncC, Ty) != C)
+      return nullptr;
+
+    // udiv (zext X), C --> zext (udiv X, C')
+    // urem (zext X), C --> zext (urem X, C')
+    // udiv C, (zext X) --> zext (udiv C', X)
+    // urem C, (zext X) --> zext (urem C', X)
+    Value *NarrowOp = isa<Constant>(D) ? Builder.CreateBinOp(Opcode, X, TruncC)
+                                       : Builder.CreateBinOp(Opcode, TruncC, X);
+    return new ZExtInst(NarrowOp, Ty);
+  }
+
+  return nullptr;
+}
+
 Instruction *InstCombiner::visitUDiv(BinaryOperator &I) {
   Value *Op0 = I.getOperand(0), *Op1 = I.getOperand(1);
 
@@ -1127,12 +1156,8 @@ Instruction *InstCombiner::visitUDiv(BinaryOperator &I) {
     }
   }
 
-  // (zext A) udiv (zext B) --> zext (A udiv B)
-  if (ZExtInst *ZOp0 = dyn_cast<ZExtInst>(Op0))
-    if (Value *ZOp1 = dyn_castZExtVal(Op1, ZOp0->getSrcTy()))
-      return new ZExtInst(
-          Builder.CreateUDiv(ZOp0->getOperand(0), ZOp1, "div", I.isExact()),
-          I.getType());
+  if (Instruction *NarrowDiv = narrowUDivURem(I, Builder))
+    return NarrowDiv;
 
   // (LHS udiv (select (select (...)))) -> (LHS >> (select (select (...))))
   SmallVector<UDivFoldAction, 6> UDivActions;
@@ -1434,7 +1459,7 @@ Instruction *InstCombiner::commonIRemTransforms(BinaryOperator &I) {
   }
 
   // Handle cases involving: rem X, (select Cond, Y, Z)
-  if (isa<SelectInst>(Op1) && SimplifyDivRemOfSelect(I))
+  if (simplifyDivRemOfSelectWithZeroOp(I))
     return &I;
 
   if (isa<Constant>(Op1)) {
@@ -1477,11 +1502,8 @@ Instruction *InstCombiner::visitURem(BinaryOperator &I) {
   if (Instruction *common = commonIRemTransforms(I))
     return common;
 
-  // (zext A) urem (zext B) --> zext (A urem B)
-  if (ZExtInst *ZOp0 = dyn_cast<ZExtInst>(Op0))
-    if (Value *ZOp1 = dyn_castZExtVal(Op1, ZOp0->getSrcTy()))
-      return new ZExtInst(Builder.CreateURem(ZOp0->getOperand(0), ZOp1),
-                          I.getType());
+  if (Instruction *NarrowRem = narrowUDivURem(I, Builder))
+    return NarrowRem;
 
   // X urem Y -> X and Y-1, where Y is a power of 2,
   if (isKnownToBeAPowerOfTwo(Op1, /*OrZero*/ true, 0, &I)) {
@@ -1592,7 +1614,7 @@ Instruction *InstCombiner::visitFRem(BinaryOperator &I) {
     return replaceInstUsesWith(I, V);
 
   // Handle cases involving: rem X, (select Cond, Y, Z)
-  if (isa<SelectInst>(Op1) && SimplifyDivRemOfSelect(I))
+  if (simplifyDivRemOfSelectWithZeroOp(I))
     return &I;
 
   return nullptr;

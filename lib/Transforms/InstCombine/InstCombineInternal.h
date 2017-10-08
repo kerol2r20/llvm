@@ -39,7 +39,6 @@ class CallSite;
 class DataLayout;
 class DominatorTree;
 class TargetLibraryInfo;
-class DbgDeclareInst;
 class MemIntrinsic;
 class MemSetInst;
 class OptimizationRemarkEmitter;
@@ -278,7 +277,7 @@ public:
   Instruction *visitURem(BinaryOperator &I);
   Instruction *visitSRem(BinaryOperator &I);
   Instruction *visitFRem(BinaryOperator &I);
-  bool SimplifyDivRemOfSelect(BinaryOperator &I);
+  bool simplifyDivRemOfSelectWithZeroOp(BinaryOperator &I);
   Instruction *commonRemTransforms(BinaryOperator &I);
   Instruction *commonIRemTransforms(BinaryOperator &I);
   Instruction *commonDivTransforms(BinaryOperator &I);
@@ -439,7 +438,8 @@ private:
   Instruction *scalarizePHI(ExtractElementInst &EI, PHINode *PN);
   Value *EvaluateInDifferentElementOrder(Value *V, ArrayRef<int> Mask);
   Instruction *foldCastedBitwiseLogic(BinaryOperator &I);
-  Instruction *shrinkBitwiseLogic(TruncInst &Trunc);
+  Instruction *narrowBinOp(TruncInst &Trunc);
+  Instruction *narrowRotate(TruncInst &Trunc);
   Instruction *optimizeBitCastFromPhi(CastInst &CI, PHINode *PN);
 
   /// Determine if a pair of casts can be replaced by a single cast.
@@ -456,10 +456,13 @@ private:
                                             const CastInst *CI2);
 
   Value *foldAndOfICmps(ICmpInst *LHS, ICmpInst *RHS, Instruction &CxtI);
-  Value *foldAndOfFCmps(FCmpInst *LHS, FCmpInst *RHS);
   Value *foldOrOfICmps(ICmpInst *LHS, ICmpInst *RHS, Instruction &CxtI);
-  Value *foldOrOfFCmps(FCmpInst *LHS, FCmpInst *RHS);
   Value *foldXorOfICmps(ICmpInst *LHS, ICmpInst *RHS);
+
+  /// Optimize (fcmp)&(fcmp) or (fcmp)|(fcmp).
+  /// NOTE: Unlike most of instcombine, this returns a Value which should
+  /// already be inserted into the function.
+  Value *foldLogicOfFCmps(FCmpInst *LHS, FCmpInst *RHS, bool IsAnd);
 
   Value *foldAndOrOfICmpsOfAndWithPow2(ICmpInst *LHS, ICmpInst *RHS,
                                        bool JoinedByAnd, Instruction &CxtI);
@@ -597,6 +600,11 @@ private:
   /// value, or null if it didn't simplify.
   Value *SimplifyUsingDistributiveLaws(BinaryOperator &I);
 
+  // Binary Op helper for select operations where the expression can be
+  // efficiently reorganized.
+  Value *SimplifySelectsFeedingBinaryOp(BinaryOperator &I, Value *LHS,
+                                        Value *RHS);
+
   /// This tries to simplify binary operations by factorizing out common terms
   /// (e. g. "(A*B)+(A*C)" -> "A*(B+C)").
   Value *tryFactorization(BinaryOperator &, Instruction::BinaryOps, Value *,
@@ -663,9 +671,9 @@ private:
   Instruction *FoldPHIArgLoadIntoPHI(PHINode &PN);
   Instruction *FoldPHIArgZextsIntoPHI(PHINode &PN);
 
-  /// Helper function for FoldPHIArgXIntoPHI() to get debug location for the
+  /// Helper function for FoldPHIArgXIntoPHI() to set debug location for the
   /// folded operation.
-  DebugLoc PHIArgMergedDebugLoc(PHINode &PN);
+  void PHIArgMergedDebugLoc(Instruction *Inst, PHINode &PN);
 
   Instruction *foldGEPICmp(GEPOperator *GEPLHS, Value *RHS,
                            ICmpInst::Predicate Cond, Instruction &I);
@@ -676,7 +684,7 @@ private:
                                             ConstantInt *AndCst = nullptr);
   Instruction *foldFCmpIntToFPConst(FCmpInst &I, Instruction *LHSI,
                                     Constant *RHSC);
-  Instruction *foldICmpAddOpConst(Instruction &ICI, Value *X, ConstantInt *CI,
+  Instruction *foldICmpAddOpConst(Value *X, ConstantInt *CI,
                                   ICmpInst::Predicate Pred);
   Instruction *foldICmpWithCastAndCast(ICmpInst &ICI);
 
@@ -687,34 +695,34 @@ private:
   Instruction *foldICmpBinOp(ICmpInst &Cmp);
   Instruction *foldICmpEquality(ICmpInst &Cmp);
 
-  Instruction *foldICmpSelectConstant(ICmpInst &Cmp, Instruction *Select,
+  Instruction *foldICmpSelectConstant(ICmpInst &Cmp, SelectInst *Select,
                                       ConstantInt *C);
-  Instruction *foldICmpTruncConstant(ICmpInst &Cmp, Instruction *Trunc,
-                                     const APInt *C);
+  Instruction *foldICmpTruncConstant(ICmpInst &Cmp, TruncInst *Trunc,
+                                     const APInt &C);
   Instruction *foldICmpAndConstant(ICmpInst &Cmp, BinaryOperator *And,
-                                   const APInt *C);
+                                   const APInt &C);
   Instruction *foldICmpXorConstant(ICmpInst &Cmp, BinaryOperator *Xor,
-                                   const APInt *C);
+                                   const APInt &C);
   Instruction *foldICmpOrConstant(ICmpInst &Cmp, BinaryOperator *Or,
-                                  const APInt *C);
+                                  const APInt &C);
   Instruction *foldICmpMulConstant(ICmpInst &Cmp, BinaryOperator *Mul,
-                                   const APInt *C);
+                                   const APInt &C);
   Instruction *foldICmpShlConstant(ICmpInst &Cmp, BinaryOperator *Shl,
-                                   const APInt *C);
+                                   const APInt &C);
   Instruction *foldICmpShrConstant(ICmpInst &Cmp, BinaryOperator *Shr,
-                                   const APInt *C);
+                                   const APInt &C);
   Instruction *foldICmpUDivConstant(ICmpInst &Cmp, BinaryOperator *UDiv,
-                                    const APInt *C);
+                                    const APInt &C);
   Instruction *foldICmpDivConstant(ICmpInst &Cmp, BinaryOperator *Div,
-                                   const APInt *C);
+                                   const APInt &C);
   Instruction *foldICmpSubConstant(ICmpInst &Cmp, BinaryOperator *Sub,
-                                   const APInt *C);
+                                   const APInt &C);
   Instruction *foldICmpAddConstant(ICmpInst &Cmp, BinaryOperator *Add,
-                                   const APInt *C);
+                                   const APInt &C);
   Instruction *foldICmpAndConstConst(ICmpInst &Cmp, BinaryOperator *And,
-                                     const APInt *C1);
+                                     const APInt &C1);
   Instruction *foldICmpAndShift(ICmpInst &Cmp, BinaryOperator *And,
-                                const APInt *C1, const APInt *C2);
+                                const APInt &C1, const APInt &C2);
   Instruction *foldICmpShrConstConst(ICmpInst &I, Value *ShAmt, const APInt &C1,
                                      const APInt &C2);
   Instruction *foldICmpShlConstConst(ICmpInst &I, Value *ShAmt, const APInt &C1,
@@ -722,8 +730,8 @@ private:
 
   Instruction *foldICmpBinOpEqualityWithConstant(ICmpInst &Cmp,
                                                  BinaryOperator *BO,
-                                                 const APInt *C);
-  Instruction *foldICmpIntrinsicWithConstant(ICmpInst &ICI, const APInt *C);
+                                                 const APInt &C);
+  Instruction *foldICmpIntrinsicWithConstant(ICmpInst &ICI, const APInt &C);
 
   // Helpers of visitSelectInst().
   Instruction *foldSelectExtConst(SelectInst &Sel);

@@ -60,7 +60,8 @@ static MCInstPrinter *createAMDGPUMCInstPrinter(const Triple &T,
                                                 const MCAsmInfo &MAI,
                                                 const MCInstrInfo &MII,
                                                 const MCRegisterInfo &MRI) {
-  return new AMDGPUInstPrinter(MAI, MII, MRI);
+  return T.getArch() == Triple::r600 ? new R600InstPrinter(MAI, MII, MRI) : 
+                                       new AMDGPUInstPrinter(MAI, MII, MRI);
 }
 
 static MCTargetStreamer *createAMDGPUAsmTargetStreamer(MCStreamer &S,
@@ -79,10 +80,7 @@ static MCTargetStreamer * createAMDGPUObjectTargetStreamer(
 static MCStreamer *createMCStreamer(const Triple &T, MCContext &Context,
                                     MCAsmBackend &MAB, raw_pwrite_stream &OS,
                                     MCCodeEmitter *Emitter, bool RelaxAll) {
-  if (T.getOS() == Triple::AMDHSA)
-    return createAMDGPUELFStreamer(Context, MAB, OS, Emitter, RelaxAll);
-
-  return createELFStreamer(Context, MAB, OS, Emitter, RelaxAll);
+  return createAMDGPUELFStreamer(T, Context, MAB, OS, Emitter, RelaxAll);
 }
 
 extern "C" void LLVMInitializeAMDGPUTargetMC() {

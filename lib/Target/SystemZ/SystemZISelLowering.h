@@ -308,6 +308,22 @@ enum NodeType : unsigned {
   // Operand 5: the width of the field in bits (8 or 16)
   ATOMIC_CMP_SWAPW,
 
+  // Atomic compare-and-swap returning glue (condition code).
+  // Val, OUTCHAIN, glue = ATOMIC_CMP_SWAP(INCHAIN, ptr, cmp, swap)
+  ATOMIC_CMP_SWAP,
+
+  // 128-bit atomic load.
+  // Val, OUTCHAIN = ATOMIC_LOAD_128(INCHAIN, ptr)
+  ATOMIC_LOAD_128,
+
+  // 128-bit atomic store.
+  // OUTCHAIN = ATOMIC_STORE_128(INCHAIN, val, ptr)
+  ATOMIC_STORE_128,
+
+  // 128-bit atomic compare-and-swap.
+  // Val, OUTCHAIN, glue = ATOMIC_CMP_SWAP(INCHAIN, ptr, cmp, swap)
+  ATOMIC_CMP_SWAP_128,
+
   // Byte swapping load.
   //
   // Operand 0: the address to load from
@@ -386,7 +402,6 @@ public:
   bool isLegalAddressingMode(const DataLayout &DL, const AddrMode &AM, Type *Ty,
                              unsigned AS,
                              Instruction *I = nullptr) const override;
-  bool isFoldableMemAccessOffset(Instruction *I, int64_t Offset) const override;
   bool allowsMisalignedMemoryAccesses(EVT VT, unsigned AS,
                                       unsigned Align,
                                       bool *Fast) const override;
@@ -449,6 +464,10 @@ public:
   EmitInstrWithCustomInserter(MachineInstr &MI,
                               MachineBasicBlock *BB) const override;
   SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const override;
+  void LowerOperationWrapper(SDNode *N, SmallVectorImpl<SDValue> &Results,
+                             SelectionDAG &DAG) const override;
+  void ReplaceNodeResults(SDNode *N, SmallVectorImpl<SDValue>&Results,
+                          SelectionDAG &DAG) const override;
   bool allowTruncateForTailCall(Type *, Type *) const override;
   bool mayBeEmittedAsTailCall(const CallInst *CI) const override;
   SDValue LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv,
@@ -566,6 +585,8 @@ private:
   MachineBasicBlock *emitCondStore(MachineInstr &MI, MachineBasicBlock *BB,
                                    unsigned StoreOpcode, unsigned STOCOpcode,
                                    bool Invert) const;
+  MachineBasicBlock *emitPair128(MachineInstr &MI,
+                                 MachineBasicBlock *MBB) const;
   MachineBasicBlock *emitExt128(MachineInstr &MI, MachineBasicBlock *MBB,
                                 bool ClearEven) const;
   MachineBasicBlock *emitAtomicLoadBinary(MachineInstr &MI,
